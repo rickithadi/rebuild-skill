@@ -102,31 +102,102 @@ ease: [0.22, 1, 0.36, 1] as [number, number, number, number]
 { "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }] }
 ```
 
+## Performance Defaults
+
+Apply these from day one — not as an afterthought:
+
+```tsx
+// Hero image — eager load, no lazy
+<img src="..." loading="eager" fetchpriority="high" alt="..." />
+
+// All other images — lazy load
+<img src="..." loading="lazy" alt="..." />
+
+// Unsplash images — always force WebP + compression
+src="https://images.unsplash.com/photo-[id]?w=800&q=80&fm=webp&auto=format"
+
+// Google Fonts — always include display=swap
+<link href="https://fonts.googleapis.com/css2?family=...&display=swap" rel="stylesheet" />
+```
+
+## Markdown Blog Pattern
+
+```ts
+// src/lib/blog.ts
+export interface PostMeta {
+  title: string
+  date: string
+  category: string
+  excerpt: string
+  slug: string
+}
+
+// Vite glob import — reads all .md files at build time
+const modules = import.meta.glob('../content/blog/*.md', {
+  eager: true,
+  query: '?raw',
+  import: 'default',
+})
+
+export function getPosts(): PostMeta[] {
+  return Object.entries(modules).map(([path, raw]) => {
+    const frontmatter = parseFrontmatter(raw as string)
+    return frontmatter as PostMeta
+  }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+}
+
+function parseFrontmatter(raw: string): Record<string, string> {
+  const match = raw.match(/^---\n([\s\S]*?)\n---/)
+  if (!match) return {}
+  return Object.fromEntries(
+    match[1].split('\n')
+      .filter(Boolean)
+      .map(line => {
+        const [key, ...rest] = line.split(':')
+        return [key.trim(), rest.join(':').trim().replace(/^"|"$/g, '')]
+      })
+  )
+}
+```
+
+Blog posts live in `src/content/blog/[slug].md` as Markdown files with YAML frontmatter. Clients add posts by creating new files in GitHub's web UI — no code required.
+
 ## File Structure
 
 ```
 src/
   components/
-    Navbar.tsx      — fixed, scroll-aware, hamburger
-    Footer.tsx      — email capture strip + 3-column layout
+    Navbar.tsx        — fixed, scroll-aware, hamburger
+    Footer.tsx        — email capture strip + 3-column layout
+    JsonLd.tsx        — JSON-LD structured data component
   sections/
-    Hero.tsx        — text-dominant, no full-bleed photo overlay
-    About.tsx       — Our Story + What We Value
-    Services.tsx    — accordion numbered list
-    Experiences.tsx — visual showcase of specific bespoke experiences
-    Testimonials.tsx — editorial blockquote grid
-    Blog.tsx        — featured + secondary posts, links to /journal
-    Contact.tsx     — Formspree form + contact details
+    Hero.tsx          — text-dominant, no full-bleed photo overlay
+    About.tsx         — Our Story + What We Value
+    Services.tsx      — accordion numbered list
+    Experiences.tsx   — visual showcase of specific bespoke experiences
+    Testimonials.tsx  — editorial blockquote grid
+    Blog.tsx          — featured + secondary posts, links to /[blog-path]
+    Contact.tsx       — Formspree form + contact details
   pages/
-    BlogIndex.tsx   — /journal
-    BlogPost.tsx    — /journal/:slug
-  data/
-    blog.ts         — BlogPost[] interface + posts array + getPost()
-  App.tsx           — BrowserRouter + Routes
-  index.css         — design tokens + blog typography
-  main.tsx          — ReactDOM.createRoot
-index.html          — SEO meta, Google Fonts
-vercel.json         — SPA rewrite
-ITERATIONS.md       — iteration tracking
-.env.sample         — VITE_FORMSPREE_ID=your_formspree_form_id
+    BlogIndex.tsx     — /[blog-path]
+    BlogPost.tsx      — /[blog-path]/:slug
+    NotFound.tsx      — 404 branded page with home link + primary CTA
+  lib/
+    blog.ts           — Markdown glob reader + frontmatter parser
+  content/
+    blog/
+      [slug].md       — one file per blog post (Markdown + frontmatter)
+  App.tsx             — BrowserRouter + Routes (including * → NotFound)
+  index.css           — design tokens + blog typography
+  main.tsx            — ReactDOM.createRoot
+index.html            — SEO meta, Google Fonts (display=swap), JSON-LD
+vercel.json           — SPA rewrite + security headers
+public/
+  robots.txt          — allow all, reference sitemap
+  sitemap.xml         — static sitemap (update domain at handoff)
+ITERATIONS.md         — iteration tracking
+PITCH.md              — client-facing summary (generated at Phase 6)
+MAINTENANCE.md        — client update guide (generated at Phase 6)
+CONTENT.md            — extracted content + assets (generated at Phase 1)
+.env.sample           — VITE_FORMSPREE_ID=your_formspree_form_id
 ```

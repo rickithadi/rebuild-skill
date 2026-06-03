@@ -48,6 +48,7 @@ You are building a modern, improved, client-ready version of an existing website
 2. Invoke `/frontend-design` to load design principles and anti-pattern list
 3. Check the working directory — if a `CONTENT.md` already exists, skip Phase 1 and continue from the most recent iteration
 4. Confirm Firecrawl MCP is available (`mcp__firecrawl-mcp__firecrawl_scrape`). If not, note that Phase 1 will use WebFetch with reduced fidelity on JS-rendered sites.
+5. Identify 2–3 direct competitors from the reference URL's industry and market. These will be scraped in Phase 1 to inform the design direction with real competitive context rather than generic anti-slop principles.
 
 ---
 
@@ -112,11 +113,50 @@ firecrawl_scrape(subpage_url, { formats: ["rawHtml", "markdown"] })
 
 Extract additional images and any new font/color references from sub-page `rawHtml` as well.
 
-#### Step 4 — Write CONTENT.md immediately
+#### Step 4 — Scrape 2–3 competitors
 
-Compile everything into `CONTENT.md` before touching any code.
+Using the competitors identified in Phase 0, scrape each homepage:
 
-#### Step 5 — Quality gate
+```
+firecrawl_scrape(competitor_url, { formats: ["markdown", "screenshot"] })
+```
+
+Extract for each competitor:
+- Their primary headline / value proposition
+- Their section structure and layout approach
+- Their primary CTA and conversion path
+- Any design patterns they're using (dark/light, font style, visual weight)
+
+Do NOT copy anything — this is competitive intelligence only. Add to CONTENT.md:
+
+```markdown
+## Competitor Analysis
+### [Competitor Name] — [url]
+Value prop: [their headline]
+Layout: [description]
+CTA: [their primary CTA]
+Design: [notable patterns]
+Differentiation opportunity: [what the client can do better]
+```
+
+#### Step 5 — Extract conversion goal
+
+From the source site, identify the single most important action the client wants a visitor to take. This is the **primary conversion goal** — it should be answered by the hero, supported by social proof, and directly accessible within 2 scrolls. Add to CONTENT.md:
+
+```markdown
+## Conversion Goal
+Primary: [e.g. "submit an inquiry form", "book a discovery call", "purchase a product"]
+Secondary: [e.g. "read the blog", "follow on Instagram"]
+Current path to conversion: [how many clicks from homepage to goal?]
+```
+
+This informs every layout decision in Phase 3 — CTA placement, social proof proximity, section ordering.
+
+#### Step 6 — Write CONTENT.md immediately
+
+Compile everything into `CONTENT.md` before touching any code. Save the Firecrawl `screenshot` from Step 1 as the **before** artifact — note its URL or embed it in CONTENT.md under `## Before Screenshot`. This will be used in the PITCH.md before/after comparison.
+
+#### Step 7 — Quality gate
 
 Before proceeding to Phase 1.5, verify CONTENT.md meets minimum viability:
 
@@ -270,6 +310,19 @@ About/Founder: [url] — [subject description]
 [additional images with url and description]
 Custom photography: [yes / no / unclear]
 
+## Conversion Goal
+Primary: [action]
+Secondary: [action]
+Current path to conversion: [N clicks from homepage]
+
+## Competitor Analysis
+### [Name] — [url]
+Value prop: [headline]
+Differentiation opportunity: [what client can do better]
+
+## Before Screenshot
+[Firecrawl screenshot URL from Phase 1 Step 1]
+
 ## Image Placeholders
 [filled in during Phase 3 — only for images where the source URL failed or was unavailable]
 ```
@@ -296,11 +349,39 @@ npm install -D tailwindcss @tailwindcss/vite
 
 Configure:
 - `vite.config.ts` — add `@tailwindcss/vite` plugin
-- `index.html` — full SEO meta tags from `CONTENT.md` (title, description, og:*, twitter:card, canonical). Add Google Fonts with `preconnect`.
+- `index.html` — full SEO meta tags from `CONTENT.md` (title, description, og:*, twitter:card, canonical). Add Google Fonts `<link>` with `preconnect` AND `font-display=swap` appended to the font URL: `&display=swap`. Add JSON-LD script tag (see `reference/seo-templates.md`).
 - `src/index.css` — CSS variables for design tokens (see `reference/tech-stack.md`)
-- `vercel.json` — `{ "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }] }`
+- `vercel.json` — SPA rewrite plus security headers:
+  ```json
+  {
+    "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }],
+    "headers": [{
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "X-Frame-Options", "value": "DENY" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" }
+      ]
+    }]
+  }
+  ```
+- `public/robots.txt` — allow all crawlers, reference sitemap:
+  ```
+  User-agent: *
+  Allow: /
+  Sitemap: https://[domain]/sitemap.xml
+  ```
+- `public/sitemap.xml` — static sitemap covering all routes. Update domain placeholder in handoff.
+- `src/components/JsonLd.tsx` — structured data component, see `reference/seo-templates.md`
+- `src/pages/NotFound.tsx` — branded 404 page with link back to home and primary CTA
 - `ITERATIONS.md` — see `reference/iteration-tracking.md`
 - `.env.sample` — `VITE_FORMSPREE_ID=your_formspree_form_id`
+
+**Performance defaults to apply from day one:**
+- All `<img>` tags: `loading="lazy"` on all below-fold images, `loading="eager"` on hero only
+- Unsplash URLs: always append `&fm=webp&q=80` for WebP format and compression
+- Client image URLs: use as-is (can't transform external URLs)
+- Google Fonts URL: must include `&display=swap` to prevent FOIT
 
 ---
 
@@ -338,6 +419,8 @@ The design direction must still:
 
 Use the section order from `reference/site-types.md` for the detected type. Pull all fixed content from `CONTENT.md`. Invent supplementary copy (section intros, experience descriptions, blog body text) freely, in the brand voice.
 
+**Conversion-informed layout**: Use `CONTENT.md § Conversion Goal` to position the primary CTA. The hero must contain the primary CTA. Social proof (testimonials) must appear within 2 scrolls of the hero. The contact/booking section must be reachable in no more than 1 click from any page.
+
 **Images — use client URLs first:**
 
 ```tsx
@@ -359,17 +442,42 @@ Only use an Unsplash fallback when a client image URL is unavailable, returns an
 />
 ```
 
+### Step 2b: JSON-LD structured data
+
+Add the `<JsonLd />` component to `App.tsx` (or the relevant page). Use the site-type template from `reference/seo-templates.md`. Populate all fields from `CONTENT.md` — business name, description, contact details, social profiles, service list.
+
+For service businesses: `LocalBusiness` + `Service` schemas
+For SaaS: `SoftwareApplication` schema
+For restaurants: `Restaurant` + `Menu` schemas
+For professional services: `ProfessionalService` + `Person` schemas
+
+### Step 2c: 404 page
+
+Create `src/pages/NotFound.tsx` — a branded page matching the site's design system. Must include:
+- A clear "Page not found" message in the site's voice (not "404 Error")
+- A link back to the homepage
+- The primary CTA (same as the hero)
+
+Add a catch-all route in `App.tsx`: `<Route path="*" element={<NotFound />} />`
+
 ### Step 3: Blog (conditional)
 
 **Only build a blog if the source site has one.** Check `CONTENT.md § Blog Topics` — if it's empty or absent, skip this step entirely. Do not add a blog section, blog pages, or blog routes.
 
 If the source site has a blog:
-- Check `CONTENT.md § Navigation` for the source site's blog URL path (e.g. `/blog`, `/journal`, `/news`, `/insights`) and use that exact path. Only use `/journal` if the source site uses that word.
-- Read the article titles from `CONTENT.md`
-- Write 4 original articles aligned to those topics — invent the body content, match the categories, write in the brand voice
-- Store in `src/data/blog.ts`
+- Check `CONTENT.md § Navigation` for the source site's blog URL path and use that exactly
+- Write 4 original articles aligned to the topics in `CONTENT.md § Blog Topics`
+- **Use Markdown files, not hardcoded TypeScript data:**
+  - Store posts as `.md` files in `src/content/blog/` with frontmatter: `title`, `date`, `category`, `excerpt`, `slug`
+  - Create `src/lib/blog.ts` to read and parse these files using Vite's `import.meta.glob`
+  - This means the client can add new posts by creating a `.md` file in GitHub's web UI — no code required
 - Add `[/blog-path]` and `[/blog-path]/:slug` routes to `App.tsx`
 - Include the Blog preview section on the homepage
+
+```ts
+// src/lib/blog.ts — Vite glob import pattern
+const posts = import.meta.glob('../content/blog/*.md', { eager: true, query: '?raw', import: 'default' })
+```
 
 ### Step 4: Contact form
 
@@ -393,6 +501,23 @@ git add .
 git commit -m "Initial build: [site name]"
 gh repo create [slug] --public --source=. --remote=origin --push
 ```
+
+**Branch strategy**: All critique iterations use feature branches, not `main`. `main` only receives the best-scoring iteration at the end.
+
+```bash
+# Before each critique iteration:
+git checkout -b rebuild/iter-1
+
+# After each iteration commit:
+git push origin rebuild/iter-1
+
+# When exit criteria are met — merge only the best iteration to main:
+git checkout main
+git merge rebuild/iter-N --no-ff -m "Merge best iteration (score N/40)"
+git push origin main
+```
+
+This means `main` always reflects the best state, and every iteration is individually recoverable.
 
 ### Step 2 — Create Vercel project and link to GitHub
 
@@ -430,7 +555,18 @@ git commit -m "Link Vercel project"
 git push origin main
 ```
 
-> **Never run `vercel deploy` after this point.** All deployments happen on `git push origin main`.
+### Step 3 — Verify first deployment succeeded
+
+After the initial push, wait ~30 seconds then verify the deployment is live:
+
+```bash
+# Get the deployment URL from Vercel
+vercel ls --scope [team] 2>/dev/null | head -5
+```
+
+Or use the Vercel MCP to check deployment status. Confirm the URL returns HTTP 200 before proceeding to Phase 5. If the deployment failed, check Vercel build logs and fix before continuing.
+
+> **Never run `vercel deploy` after this point.** All deployments happen on `git push`.
 
 ---
 
@@ -460,17 +596,36 @@ Always invoke as `/critique --auto` within this loop. The `--auto` flag is a har
    - No horizontal scroll at any viewport width
    Fix any issues found.
 
-5. Update `ITERATIONS.md` — score, all changes made, both build gate results, mobile check result, Vercel URL once available
+5. **Visual verification** — use the `seo-visual` agent (or Playwright directly) to take a screenshot of the built/deployed site at 1440px and 375px. Compare against the Firecrawl screenshot saved in `CONTENT.md § Before Screenshot`. Check:
+   - Fonts are rendering (not falling back to system fonts)
+   - Hero image is loading
+   - Color palette matches extracted brand colors
+   - No layout overflow or broken sections visible
+   - Text is readable and hierarchy is clear
+   Fix any visible issues before committing.
 
-6. `git add . && git commit -m "Iteration N: [summary of all fixes]" && git push origin main`
+6. **Regression check** — verify that key sections are still present by scanning the built code:
+   - Navbar with primary CTA exists
+   - Hero section with headline and CTA exists
+   - Contact form or booking link exists
+   - Footer with contact details exists
+   If any are missing, restore them before committing.
 
-7. Check exit criteria — if met, proceed to Phase 6. If not, start the next iteration immediately from step 1.
+7. **Deployment verification** — after pushing, confirm the Vercel deployment succeeded by checking the deployment URL returns HTTP 200. If it fails, check the Vercel build log and fix before marking the iteration complete.
+
+8. Update `ITERATIONS.md` — score, all changes made, build gate results, visual check result, regression check result, Vercel deployment URL
+
+9. `git add . && git commit -m "Iteration N: [summary]" && git push origin rebuild/iter-N`
+
+10. Check exit criteria — if met, merge best iteration to `main` and proceed to Phase 6. If not, create `rebuild/iter-N+1` branch and start next iteration from step 1.
 
 ### Exit criteria (all must be true):
 - Score ≥ 36/40
 - Anti-patterns verdict: PASS
 - No unresolved P0 or P1 issues
 - Mobile check passed at 375px and 768px
+- Visual verification passed (fonts, images, colors rendering correctly)
+- Deployment verified live at HTTP 200
 
 ### If 5 iterations reached without meeting exit criteria:
 - Add `⚠️ MAX ITERATIONS REACHED` entry to `ITERATIONS.md`
@@ -481,18 +636,35 @@ Always invoke as `/critique --auto` within this loop. The `--auto` flag is a har
 
 ## Phase 6 — Handoff
 
-Write these two files, then output the console summary.
+Write three files, then output the console summary.
 
 ### ITERATIONS.md — final entry
 
-Mark the last iteration `✓ FINAL`. Add:
+Mark the last iteration `✓ FINAL` and note which branch was merged to `main`. Add:
 - Final score and band
 - Anti-patterns verdict
-- Outstanding items: image placeholders needing real photos, Formspree not yet configured, any pages that were out of scope
+- Visual verification result
+- Outstanding items: image placeholders, Formspree not configured, pages out of scope
 
 ### PITCH.md
 
-Generate from `reference/pitch-template.md`. This is the document that goes to the client. Plain language, no technical jargon, before/after framing.
+Generate from `reference/pitch-template.md`. Enhancements for this version:
+
+**Before/after section**: Include the Firecrawl screenshot URL from `CONTENT.md § Before Screenshot` as the "before" image. Add a note that the "after" is live at the Vercel URL. Frame the comparison around the 3 most visible improvements found in the first critique pass.
+
+**Competitor context**: Add a brief line using `CONTENT.md § Competitor Analysis` — something like: *"We reviewed [Competitor A] and [Competitor B] while designing this. The approach we took differentiates on [specific opportunity]."* This positions the rebuild as research-informed, not just aesthetically improved.
+
+**SEO additions**: Add a bullet noting that structured data (JSON-LD), a sitemap, and robots.txt were added. These are invisible improvements the client's current site likely lacks and are easy wins to highlight.
+
+### MAINTENANCE.md
+
+Generate from `reference/maintenance-template.md`. This is the document that tells the client how to update their own site. It must:
+- Explain how to add a blog post (create a `.md` file in `src/content/blog/`)
+- Explain how to update contact details (one file to edit)
+- Explain how to update services copy (one file to edit)
+- Explain how to replace placeholder images
+- Explain the Formspree setup with step-by-step instructions
+- Note what requires a developer vs. what the client can do themselves
 
 ### Console output
 
@@ -501,19 +673,24 @@ Generate from `reference/pitch-template.md`. This is the document that goes to t
 
 Source: [original URL]
 Repo: https://github.com/[user]/[slug]
+Live: [Vercel deployment URL — verified HTTP 200]
 Final score: [N]/40
-Anti-patterns: PASS / FAIL
+Anti-patterns: PASS
 
-Sections built: [list]
-Articles written: [titles]
+Sections: [list]
+Blog articles: [titles]
+Structured data: [schema types added]
 
 Client action items:
-1. Formspree: formspree.io → New Form → [email] → VITE_FORMSPREE_ID in Vercel env
+1. Formspree: formspree.io → New Form → [email] → VITE_FORMSPREE_ID in Vercel env vars
 2. Photography: [N] placeholders — see CONTENT.md § Image Placeholders
-3. [any out-of-scope pages noted]
+3. Domain: point [domain] to Vercel — Dashboard → Domains → Add
+4. [any out-of-scope pages]
 
-PITCH.md is ready for the client email.
-ITERATIONS.md has the full build history.
+Files for the client:
+- PITCH.md — send this to the client
+- MAINTENANCE.md — send this when they sign
+- ITERATIONS.md — internal build history
 ```
 
 ---
@@ -521,21 +698,28 @@ ITERATIONS.md has the full build history.
 ## Rules
 
 1. **Write CONTENT.md before any code.** It survives context compression; your memory does not.
-2. **Use Firecrawl with rawHtml + screenshot.** Extract actual client images, fonts, and colors — don't invent them if they're available.
-3. **Use client's actual images, fonts, and colors.** Only fall back to Unsplash/invented assets when extraction genuinely fails.
-4. **Testimonials are verbatim.** Character-for-character. No paraphrasing ever.
-5. **Service names, contact details, credentials are verbatim.** Everything else can be improved.
-6. **Detect site type before scaffolding.** Use `reference/site-types.md`.
-7. **`data-replace` only for unavailable images.** Not for every image — only ones where the client URL failed.
-8. **No AI-slop patterns.** Passes `/frontend-design` anti-pattern check.
-9. **Formspree over mailto.** mailto is fallback only.
-10. **Link Vercel in Phase 4.** Run `vercel link` + `vercel git connect` so all pushes auto-deploy. Never run `vercel deploy` directly after that.
-11. **Only build a blog if the source site has one.** No blog in CONTENT.md = no blog in the build.
-12. **Blog routes match the source.** `/blog`, `/news`, `/insights` — whatever the source uses. Never default to `/journal` unless the source uses that word.
-13. **Always invoke `/critique --auto` in the loop.** The flag is the hard mechanism for autonomy — not a text instruction. Never call `/critique` without `--auto` inside Phase 5.
-14. **Two build gates per iteration.** `npm run build` before critique and after. Never commit a broken build.
-15. **Fix all severity levels.** P0 through P3 — everything gets fixed unless blocked by a missing client asset.
-16. **5-iteration cap.** Exit with explanation if not resolved.
-17. **Explicit mobile check every iteration.** 375px and 768px before committing.
-18. **PITCH.md at handoff.** The rebuild only sells if the client can read about it.
-19. **ITERATIONS.md stays current.** Every push gets an entry.
+2. **Scrape competitors in Phase 1.** Design direction must be informed by the real competitive context, not generic anti-slop principles alone.
+3. **Extract conversion goal in Phase 1.** Every layout decision is downstream of the primary conversion goal.
+4. **Use Firecrawl with rawHtml + screenshot.** Extract actual client images, fonts, and colors — don't invent them if they're available.
+5. **Use client's actual images, fonts, and colors.** Only fall back to Unsplash/invented assets when extraction genuinely fails.
+6. **Testimonials are verbatim.** Character-for-character. No paraphrasing ever.
+7. **Service names, contact details, credentials are verbatim.** Everything else can be improved.
+8. **Detect site type before scaffolding.** Use `reference/site-types.md`.
+9. **`data-replace` only for unavailable images.** Not for every image — only ones where the client URL failed.
+10. **Add JSON-LD, sitemap.xml, robots.txt in Phase 2.** SEO structure is not optional — the client's current site likely lacks it and it's an easy pitch differentiator.
+11. **Blog uses Markdown files, not TypeScript data.** Clients must be able to add posts without touching code.
+12. **404 page is required.** Add it with a route and branded design before any critique iteration.
+13. **No AI-slop patterns.** Passes `/frontend-design` anti-pattern check.
+14. **Formspree over mailto.** mailto is fallback only.
+15. **Link Vercel in Phase 4.** `vercel link --yes` + `vercel git connect --yes`. Never run `vercel deploy` after that.
+16. **Verify deployment after every push.** HTTP 200 on the Vercel URL before marking an iteration complete.
+17. **Only build a blog if the source site has one.** No blog in CONTENT.md = no blog in the build.
+18. **Blog routes match the source.** Use the source site's exact path — never default to `/journal`.
+19. **Branch-per-iteration.** Critique iterations go on `rebuild/iter-N` branches. Only the best-scoring iteration merges to `main`.
+20. **Always invoke `/critique --auto` in the loop.** Never call `/critique` without `--auto` inside Phase 5.
+21. **Two build gates per iteration.** `npm run build` before critique and after. Never commit a broken build.
+22. **Visual verification every iteration.** Screenshot at 1440px and 375px — check fonts, images, colors, layout.
+23. **Regression check every iteration.** Verify navbar, hero, contact form, and footer still exist after every set of fixes.
+24. **Fix all severity levels.** P0 through P3 — everything gets fixed unless blocked by a missing client asset.
+25. **5-iteration cap.** Exit with explanation if not resolved.
+26. **Write PITCH.md, MAINTENANCE.md, and ITERATIONS.md at handoff.** Three files, not one.
