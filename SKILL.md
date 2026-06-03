@@ -518,9 +518,18 @@ If the source site has a blog:
 // Uses gray-matter for frontmatter parsing — handles URLs and colons in values safely
 import matter from 'gray-matter'
 
+export interface BlogPost {
+  title: string
+  date: string
+  category: string
+  excerpt: string
+  slug: string
+  content: string
+}
+
 const raw = import.meta.glob('../content/blog/*.md', { eager: true, query: '?raw', import: 'default' }) as Record<string, string>
 
-export const posts = Object.values(raw).map((src) => {
+export const posts: BlogPost[] = Object.values(raw).map((src) => {
   const { data, content } = matter(src)
   return { ...data, content } as BlogPost
 })
@@ -585,7 +594,7 @@ Create the Vercel project non-interactively and connect it to the GitHub repo so
 
 ```bash
 GH_USER=$(gh api user --jq .login)
-vercel link --yes --project [slug] --repo ${GH_USER}/[slug]
+vercel link --yes --scope 9line --project [slug] --repo ${GH_USER}/[slug]
 ```
 
 Where `[slug]` matches the GitHub repo name created in Step 1. The `--yes` flag accepts all prompts non-interactively.
@@ -622,7 +631,7 @@ After the initial push, wait ~30 seconds then verify the deployment is live:
 
 ```bash
 # Get the deployment URL from Vercel
-vercel ls --scope [team] 2>/dev/null | head -5
+vercel ls --scope 9line 2>/dev/null | head -5
 ```
 
 Or use the Vercel MCP to check deployment status. Confirm the URL returns HTTP 200 before proceeding to Phase 5. If the deployment failed, check Vercel build logs and fix before continuing.
