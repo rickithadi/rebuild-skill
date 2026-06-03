@@ -16,6 +16,60 @@ You are building a modern, improved, client-ready version of an existing website
 
 ---
 
+## Prerequisites
+
+Everything below must be in place before running this skill. Check each item before starting.
+
+### Skills — install in `~/.claude/skills/`
+
+This skill calls two other skills. Both must be present on the machine:
+
+| Skill | Where used |
+|---|---|
+| `critique` | Phase 5 — invoked as `/critique --auto` each iteration |
+| `frontend-design` | Phase 0 — loads design principles and anti-pattern list |
+
+To install: copy each skill's directory into `~/.claude/skills/` so the path is `~/.claude/skills/critique/SKILL.md` and `~/.claude/skills/frontend-design/SKILL.md`.
+
+### Agent — install in `~/.claude/agents/`
+
+| Agent | Where used |
+|---|---|
+| `seo-visual` | Phase 5 — screenshot-based visual verification |
+
+To install: copy `seo-visual.md` into `~/.claude/agents/`. If unavailable, Phase 5 visual verification falls back to Playwright directly — install it with `npm install -D @playwright/test && npx playwright install chromium` inside the project.
+
+### MCP servers
+
+| MCP | Status | Where used |
+|---|---|---|
+| Firecrawl (`mcp__firecrawl-mcp__firecrawl_scrape`) | **Required** | Phase 1 — content extraction |
+| Vercel MCP (`mcp__plugin_vercel_vercel`) | Optional | Phase 4 fallback if `vercel git connect` fails |
+
+Configure MCPs via your Claude Code MCP settings. Without Firecrawl, Phase 1 falls back to WebFetch with reduced fidelity on JS-rendered sites.
+
+### CLIs — must be installed and authenticated
+
+| Tool | Install | Auth |
+|---|---|---|
+| Node.js 18+ and npm | [nodejs.org](https://nodejs.org) | — |
+| `gh` (GitHub CLI) | `brew install gh` | `gh auth login` |
+| `vercel` (Vercel CLI) | `npm i -g vercel` | `vercel login` |
+| `jq` | `brew install jq` | — |
+| `curl` | pre-installed on Mac/Linux | — |
+
+### Vercel team scope
+
+If your Vercel account belongs to a team, add this line to your `~/.claude/CLAUDE.md` (create the file if it doesn't exist):
+
+```
+all Vercel deployments must use the "[your-team-slug]" team scope (always pass --scope [your-team-slug] to vercel CLI commands)
+```
+
+Replace `[your-team-slug]` with your slug from the Vercel dashboard (Settings → General → Team Slug). If you are on a personal account with no team, omit this line — the skill will run without `--scope`.
+
+---
+
 ## Content Hierarchy
 
 ### Must be verbatim (never change):
@@ -44,7 +98,7 @@ You are building a modern, improved, client-ready version of an existing website
 
 ## Phase 0 — Read Context
 
-1. Check memory for any existing project notes on this client or URL
+1. If a persistent memory system is configured, check for any existing project notes on this client or URL. If not, skip.
 2. Invoke `/frontend-design` to load design principles and anti-pattern list
 3. Check the working directory — if a `CONTENT.md` already exists, skip Phase 1 and continue from the most recent iteration
 4. Confirm Firecrawl MCP is available (`mcp__firecrawl-mcp__firecrawl_scrape`). If not, note that Phase 1 will use WebFetch with reduced fidelity on JS-rendered sites.
@@ -590,14 +644,26 @@ This means `main` always reflects the best state, and every iteration is individ
 
 ### Step 2 — Create Vercel project and link to GitHub
 
-Create the Vercel project non-interactively and connect it to the GitHub repo so all future `git push` calls auto-deploy:
+First, detect the Vercel team scope. If the user has a team slug set in their `CLAUDE.md`, use that. Otherwise, auto-detect:
+
+```bash
+# Auto-detect Vercel team scope (empty string = personal account, no --scope needed)
+VERCEL_SCOPE=$(vercel teams ls --json 2>/dev/null | jq -r '.[0].slug // empty')
+```
+
+Then create the Vercel project non-interactively and connect it to the GitHub repo so all future `git push` calls auto-deploy:
 
 ```bash
 GH_USER=$(gh api user --jq .login)
-vercel link --yes --scope 9line --project [slug] --repo ${GH_USER}/[slug]
+
+# With team scope:
+vercel link --yes --scope ${VERCEL_SCOPE} --project [slug] --repo ${GH_USER}/[slug]
+
+# Without team scope (personal account):
+vercel link --yes --project [slug] --repo ${GH_USER}/[slug]
 ```
 
-Where `[slug]` matches the GitHub repo name created in Step 1. The `--yes` flag accepts all prompts non-interactively.
+Run the correct variant based on whether `VERCEL_SCOPE` is set. Where `[slug]` matches the GitHub repo name created in Step 1. The `--yes` flag accepts all prompts non-interactively.
 
 Then connect the GitHub integration so pushes to `main` trigger deployments:
 
@@ -630,8 +696,8 @@ git push origin main
 After the initial push, wait ~30 seconds then verify the deployment is live:
 
 ```bash
-# Get the deployment URL from Vercel
-vercel ls --scope 9line 2>/dev/null | head -5
+# Get the deployment URL from Vercel (add --scope ${VERCEL_SCOPE} if on a team)
+vercel ls 2>/dev/null | head -5
 ```
 
 Or use the Vercel MCP to check deployment status. Confirm the URL returns HTTP 200 before proceeding to Phase 5. If the deployment failed, check Vercel build logs and fix before continuing.
@@ -671,7 +737,7 @@ Always invoke as `/critique --auto` within this loop. The `--auto` flag is a har
    - No horizontal scroll at any viewport width
    Fix any issues found.
 
-5. **Visual verification** — use the `seo-visual` agent (or Playwright directly) to take a screenshot of the built/deployed site at 1440px and 375px. Compare against the Firecrawl screenshot saved in `CONTENT.md § Before Screenshot`. Check:
+5. **Visual verification** — take a screenshot of the built/deployed site at 1440px and 375px. Use whichever tool is available: the `seo-visual` agent if installed, otherwise Playwright directly (`npx playwright screenshot --browser chromium --viewport-size "1440,900" [url] screenshot-1440.png`). If neither is available, note it in `ITERATIONS.md` and skip this check rather than stalling. Compare against the Firecrawl screenshot saved in `CONTENT.md § Before Screenshot`. Check:
    - Fonts are rendering (not falling back to system fonts)
    - Hero image is loading
    - Color palette matches extracted brand colors
