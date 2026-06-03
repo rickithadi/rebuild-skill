@@ -74,6 +74,21 @@ Check word count of the markdown result: if under ~300 words, the site likely us
 
 From the `rawHtml`, extract:
 
+**Logo**
+- Look for `<img>` tags in `<header>` or `<nav>` with `alt` text containing the site/brand name, or class/id names like `logo`, `brand`, `site-logo`
+- Check `<a href="/">` wrapping an `<img>` — this is almost always the logo
+- Check `<meta property="og:logo">` or `<link rel="apple-touch-icon">` as secondary signals
+- Extract the absolute URL. If it's an SVG, that's ideal — use it directly. If it's a PNG/WebP, use as-is.
+- Save this URL as `Logo` in CONTENT.md. This will be used in the Navbar and footer.
+
+**Favicon**
+- `<link rel="icon" href="...">` — the primary favicon (may be `.ico`, `.png`, or `.svg`)
+- `<link rel="icon" type="image/svg+xml" href="...">` — SVG favicon, preferred if present
+- `<link rel="apple-touch-icon" href="...">` — used as a 180×180 fallback
+- `<link rel="manifest" href="...">` — check the manifest for `icons` array entries
+- Extract all favicon URLs found. Prefer SVG > PNG 32px+ > ICO.
+- Save as `Favicon` in CONTENT.md. Copy the favicon file into `public/` during Phase 2.
+
 **Images**
 - All `<img src="...">` and `srcset` values — keep absolute URLs, discard data URIs and tracking pixels (1x1, under 10px)
 - `<meta property="og:image">` — usually the hero or brand image
@@ -217,6 +232,11 @@ If fewer than 4 of these pass, the extraction is too thin to build from. Do not 
 **Email Capture**
 - List name, offer description
 
+**Logo + Favicon** — extract from rawHtml
+- Logo URL (from `<header>/<nav>` img, or `<a href="/">` img)
+- Favicon URL (from `<link rel="icon">` — prefer SVG variant)
+- Apple touch icon URL
+
 **Images** — extract actual URLs from rawHtml
 - All usable image URLs (hero, about, services, blog thumbnails)
 - og:image URL
@@ -303,6 +323,16 @@ Dominant colors (from screenshot):
   Accent: [hex]
   Secondary: [hex if present]
 
+## Logo
+URL: [absolute url to logo image — SVG preferred]
+Format: [svg / png / webp]
+Notes: [e.g. "dark background only", "has tagline baked in", "white variant available at [url]"]
+
+## Favicon
+Primary: [url] — [type: svg / png / ico]
+Apple touch icon: [url or "none found"]
+Notes: [e.g. "only .ico found — will need SVG recreation", "SVG favicon available"]
+
 ## Images
 og:image: [url]
 Hero: [url] — [subject description]
@@ -343,13 +373,20 @@ Do not default every site to the Service Business template. A hotel, a SaaS app,
 npm create vite@latest [project-slug] -- --template react-ts
 cd [project-slug]
 npm install
-npm install framer-motion lucide-react react-router-dom
+npm install framer-motion lucide-react react-router-dom gray-matter
 npm install -D tailwindcss @tailwindcss/vite
 ```
 
 Configure:
 - `vite.config.ts` — add `@tailwindcss/vite` plugin
-- `index.html` — full SEO meta tags from `CONTENT.md` (title, description, og:*, twitter:card, canonical). Add Google Fonts `<link>` with `preconnect` AND `font-display=swap` appended to the font URL: `&display=swap`. Add JSON-LD script tag (see `reference/seo-templates.md`).
+- `index.html` — full SEO meta tags from `CONTENT.md` (title, description, og:*, twitter:card, canonical). Add Google Fonts `<link>` with `preconnect` AND `font-display=swap` appended to the font URL: `&display=swap`. Add JSON-LD script tag (see `reference/seo-templates.md`). Wire the favicon from `CONTENT.md § Favicon`:
+  ```html
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  ```
+  Use whichever variants were extracted. If only `.ico` was found, use `<link rel="icon" href="/favicon.ico" />`.
+- `public/` — copy the client's favicon file(s) here by fetching the extracted URL(s) with `curl -o public/favicon.[ext] "[url]"`. If SVG favicon found, save as `public/favicon.svg`. If PNG, save as `public/favicon.png`. Also save the logo as `public/logo.[ext]` for use in Navbar/footer `<img src="/logo.[ext]">`. If fetching fails (signed URL, CORS, etc.), note in CONTENT.md § Image Placeholders and use a text wordmark as fallback.
 - `src/index.css` — CSS variables for design tokens (see `reference/tech-stack.md`)
 - `vercel.json` — SPA rewrite plus security headers:
   ```json
@@ -402,6 +439,8 @@ Fonts (from CONTENT.md § Fonts):
   Display: [extracted font family]
   Body: [extracted font family]
 Google Fonts URL: [verbatim from CONTENT.md, or new URL if none found]
+Logo: [/logo.svg or /logo.png — confirmed present in public/, or "text wordmark fallback"]
+Favicon: [/favicon.svg or /favicon.png — confirmed present in public/]
 Sections: [ordered list from site-type template]
 ```
 
@@ -476,7 +515,15 @@ If the source site has a blog:
 
 ```ts
 // src/lib/blog.ts — Vite glob import pattern
-const posts = import.meta.glob('../content/blog/*.md', { eager: true, query: '?raw', import: 'default' })
+// Uses gray-matter for frontmatter parsing — handles URLs and colons in values safely
+import matter from 'gray-matter'
+
+const raw = import.meta.glob('../content/blog/*.md', { eager: true, query: '?raw', import: 'default' }) as Record<string, string>
+
+export const posts = Object.values(raw).map((src) => {
+  const { data, content } = matter(src)
+  return { ...data, content } as BlogPost
+})
 ```
 
 ### Step 4: Contact form
@@ -488,6 +535,17 @@ Formspree with `VITE_FORMSPREE_ID`. States: `idle → sending → sent | error`.
 - `:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }` globally
 - Hover via CSS (`a:hover h3`) not `onMouseEnter` on heading elements
 - Mobile nav dismissable via backdrop tap or Escape key
+- **Reduced-motion**: add to `src/index.css` so Framer Motion animations respect system accessibility settings:
+  ```css
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+  ```
+  For Framer Motion components that need finer control, use the `useReducedMotion()` hook and pass `{ duration: 0 }` variants when it returns `true`.
 
 ---
 
@@ -519,12 +577,15 @@ git push origin main
 
 This means `main` always reflects the best state, and every iteration is individually recoverable.
 
+> **Preview deployments**: Vercel watches all branches by default. Pushing `rebuild/iter-N` will trigger a preview deployment for that branch — this is intentional and useful (each iteration gets its own preview URL). Only the `main` branch deployment is considered the canonical pitch URL. Record both the iteration preview URL and the main URL in `ITERATIONS.md`.
+
 ### Step 2 — Create Vercel project and link to GitHub
 
 Create the Vercel project non-interactively and connect it to the GitHub repo so all future `git push` calls auto-deploy:
 
 ```bash
-vercel link --yes --project [slug] --repo rickithadi/[slug]
+GH_USER=$(gh api user --jq .login)
+vercel link --yes --project [slug] --repo ${GH_USER}/[slug]
 ```
 
 Where `[slug]` matches the GitHub repo name created in Step 1. The `--yes` flag accepts all prompts non-interactively.
@@ -578,7 +639,12 @@ Or use the Vercel MCP to check deployment status. Confirm the URL returns HTTP 2
 
 ### Critique mode
 
-Always invoke as `/critique --auto` within this loop. The `--auto` flag is a hard instruction to the critique skill to skip Phase 3, implement all fixes directly, and return only a score + diff summary. This is the mechanism that makes the loop non-interactive — it is not a soft suggestion.
+Always invoke as `/critique --auto` within this loop. The `--auto` flag is a hard instruction to the critique skill to:
+- Skip Phase 3 entirely (no questions, no approval requests, no summaries)
+- Implement **all** fixes directly into the working files immediately
+- Return only: score, list of what was fixed, list of what was blocked (with reason)
+
+**If the critique skill surfaces a summary or asks a question instead of editing files, treat that as a failure of the `--auto` flag.** In that case: implement every fix from the critique output yourself before proceeding to the build gate. The loop must never stall waiting for user input.
 
 ### Each iteration:
 
@@ -701,7 +767,7 @@ Files for the client:
 2. **Scrape competitors in Phase 1.** Design direction must be informed by the real competitive context, not generic anti-slop principles alone.
 3. **Extract conversion goal in Phase 1.** Every layout decision is downstream of the primary conversion goal.
 4. **Use Firecrawl with rawHtml + screenshot.** Extract actual client images, fonts, and colors — don't invent them if they're available.
-5. **Use client's actual images, fonts, and colors.** Only fall back to Unsplash/invented assets when extraction genuinely fails.
+5. **Use client's actual images, fonts, colors, logo, and favicon.** Only fall back to Unsplash/invented assets when extraction genuinely fails. Use the real logo in the Navbar and footer; use the real favicon in `index.html`. If neither can be fetched, use a text wordmark and note it in Image Placeholders.
 6. **Testimonials are verbatim.** Character-for-character. No paraphrasing ever.
 7. **Service names, contact details, credentials are verbatim.** Everything else can be improved.
 8. **Detect site type before scaffolding.** Use `reference/site-types.md`.
