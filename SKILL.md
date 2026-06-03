@@ -116,6 +116,21 @@ Extract additional images and any new font/color references from sub-page `rawHt
 
 Compile everything into `CONTENT.md` before touching any code.
 
+#### Step 5 — Quality gate
+
+Before proceeding to Phase 1.5, verify CONTENT.md meets minimum viability:
+
+- [ ] Hero headline present
+- [ ] At least 1 service name present
+- [ ] At least 1 testimonial present
+- [ ] Contact email present
+- [ ] At least 3 images extracted OR acknowledged as unavailable
+
+If fewer than 4 of these pass, the extraction is too thin to build from. Do not proceed. Instead:
+1. Attempt a second Firecrawl pass with `{ formats: ["rawHtml"] }` on any sub-pages not yet scraped
+2. Try WebFetch as a cross-reference on the homepage
+3. If still thin after both attempts, output a clear explanation of what was and wasn't found, and halt — do not build on incomplete data
+
 ### What to extract:
 
 **Structure**
@@ -381,23 +396,33 @@ gh repo create [slug] --public --source=. --remote=origin --push
 
 ### Step 2 — Create Vercel project and link to GitHub
 
-Use the Vercel CLI to create the project and connect it to the GitHub repo so all future `git push` calls auto-deploy:
+Create the Vercel project non-interactively and connect it to the GitHub repo so all future `git push` calls auto-deploy:
 
 ```bash
-vercel link --yes
+vercel link --yes --project [slug] --repo rickithadi/[slug]
 ```
 
-If no existing project is detected, Vercel will prompt to create one — accept. This creates `.vercel/project.json` which links the local directory to the Vercel project.
+Where `[slug]` matches the GitHub repo name created in Step 1. The `--yes` flag accepts all prompts non-interactively.
 
-Then set the GitHub integration so pushes to `main` trigger auto-deployments:
+Then connect the GitHub integration so pushes to `main` trigger deployments:
 
 ```bash
-vercel git connect
+vercel git connect --yes
 ```
 
-> If `vercel git connect` is not available in the installed CLI version, instruct the user to go to the Vercel dashboard → Project Settings → Git → connect the GitHub repo manually. Note this in the console output.
+If `vercel git connect` fails (older CLI versions may not support it), fall back to the Vercel MCP if available:
 
-After linking, do a final push to trigger the first auto-deployment:
+```
+mcp__plugin_vercel_vercel — link project to GitHub repo
+```
+
+Otherwise note in the console output:
+```
+⚠️ Vercel GitHub integration needs manual setup:
+   Dashboard → [project] → Settings → Git → Connect Repository → [repo name]
+```
+
+After linking, commit `.vercel/project.json` and push to trigger the first auto-deployment:
 
 ```bash
 git add .vercel
@@ -405,7 +430,7 @@ git commit -m "Link Vercel project"
 git push origin main
 ```
 
-> **Never run `vercel deploy` directly after this point.** All deployments happen automatically on `git push origin main`. The Vercel project is now permanently linked — every iteration's push triggers a new deployment.
+> **Never run `vercel deploy` after this point.** All deployments happen on `git push origin main`.
 
 ---
 
@@ -417,25 +442,29 @@ git push origin main
 
 ### Critique mode
 
-When running `/critique` inside this loop, operate in **autonomous mode**:
-- Skip Phase 3 (Ask the User) entirely — do not ask any questions
-- After critique produces its findings, immediately move to fixing without waiting for input
-- Treat all findings as approved for fixing
+Always invoke as `/critique --auto` within this loop. The `--auto` flag is a hard instruction to the critique skill to skip Phase 3, implement all fixes directly, and return only a score + diff summary. This is the mechanism that makes the loop non-interactive — it is not a soft suggestion.
 
 ### Each iteration:
 
-1. Run `/critique` — record score and all findings (P0–P3)
-2. **Fix everything** — all P0, P1, P2, and P3 issues in a single pass. The only exceptions are issues that literally cannot be fixed without missing client assets (photographs, real credentials, Formspree ID). Note those as blocked in `ITERATIONS.md`.
-3. **Mobile check** — read the built code and verify these at 375px and 768px:
-   - Nav hamburger present and dismissable
-   - No section padding collapses to zero or causes overflow
-   - Images maintain aspect ratios, no stretching
+1. **Build gate (pre-critique)** — run `npm run build 2>&1`. If it fails, fix all TypeScript and compilation errors before anything else. Do not critique broken code — the deployed site won't render and critique results will be meaningless.
+
+2. Run `/critique --auto` — the `--auto` flag skips Phase 3 questions and directly implements all fixes, outputting only: score, fixed list, blocked list.
+
+3. **Build gate (post-critique)** — run `npm run build 2>&1` again. Critique edits can introduce new TypeScript errors. Fix any that appear before committing.
+
+4. **Mobile check** — verify at 375px and 768px by reading the built code:
+   - Nav hamburger present and dismissable (Escape key or backdrop click)
+   - No section padding collapses to zero or causes horizontal overflow
+   - Images maintain aspect ratios
    - Form inputs and buttons have adequate touch target size (min 44px height)
-   - No horizontal scroll introduced
-   Fix any mobile issues found before committing.
-4. Update `ITERATIONS.md` — score, all changes made, mobile check result, Vercel URL once available
-5. `git add . && git commit -m "Iteration N: [summary of all fixes]" && git push origin main`
-6. Check exit criteria — if met, proceed to Phase 6. If not, start next iteration immediately.
+   - No horizontal scroll at any viewport width
+   Fix any issues found.
+
+5. Update `ITERATIONS.md` — score, all changes made, both build gate results, mobile check result, Vercel URL once available
+
+6. `git add . && git commit -m "Iteration N: [summary of all fixes]" && git push origin main`
+
+7. Check exit criteria — if met, proceed to Phase 6. If not, start the next iteration immediately from step 1.
 
 ### Exit criteria (all must be true):
 - Score ≥ 36/40
@@ -503,9 +532,10 @@ ITERATIONS.md has the full build history.
 10. **Link Vercel in Phase 4.** Run `vercel link` + `vercel git connect` so all pushes auto-deploy. Never run `vercel deploy` directly after that.
 11. **Only build a blog if the source site has one.** No blog in CONTENT.md = no blog in the build.
 12. **Blog routes match the source.** `/blog`, `/news`, `/insights` — whatever the source uses. Never default to `/journal` unless the source uses that word.
-13. **The critique loop is fully autonomous.** No questions, no pauses. Fix everything (P0–P3), commit, push, repeat.
-14. **Fix all severity levels.** P0 through P3 — everything gets fixed unless blocked by a missing client asset.
-15. **5-iteration cap.** Exit with explanation if not resolved.
-16. **Explicit mobile check every iteration.** 375px and 768px before committing.
-17. **PITCH.md at handoff.** The rebuild only sells if the client can read about it.
-18. **ITERATIONS.md stays current.** Every push gets an entry.
+13. **Always invoke `/critique --auto` in the loop.** The flag is the hard mechanism for autonomy — not a text instruction. Never call `/critique` without `--auto` inside Phase 5.
+14. **Two build gates per iteration.** `npm run build` before critique and after. Never commit a broken build.
+15. **Fix all severity levels.** P0 through P3 — everything gets fixed unless blocked by a missing client asset.
+16. **5-iteration cap.** Exit with explanation if not resolved.
+17. **Explicit mobile check every iteration.** 375px and 768px before committing.
+18. **PITCH.md at handoff.** The rebuild only sells if the client can read about it.
+19. **ITERATIONS.md stays current.** Every push gets an entry.
