@@ -114,6 +114,107 @@ Replace `[your-team-slug]` with your slug from the Vercel dashboard (Settings �
 
 Use **Firecrawl** as the primary tool. Fall back to WebFetch only if Firecrawl is unavailable.
 
+#### WebFetch fallback protocol (when Firecrawl is unavailable)
+
+WebFetch converts HTML to markdown and strips structural markup — it **will not** return image URLs, font `<link>` tags, or `<meta>` color values from a single general scrape. To compensate, run **two separate WebFetch calls** on the homepage:
+
+**Call A — text content** (services, testimonials, copy):
+```
+WebFetch(url, prompt: "Extract all text content: hero headline, subheadline, CTA button labels, about/story paragraphs, every service name and description, all testimonials verbatim with client names, contact details (phone/email/address/social), any taglines or brand phrases, navigation labels, any pricing or credentials.")
+```
+
+**Call B — visual assets only** (run in parallel with Call A):
+```
+WebFetch(url, prompt: "Extract ONLY asset URLs from this page. List verbatim: 1) Every img src URL (full absolute URLs only, no data URIs), 2) Every srcset or data-src value, 3) og:image meta tag content, 4) Any CDN image URLs (e.g. static.wixstatic.com, cdn.shopify.com, images.squarespace-cdn.com, wp-content/uploads), 5) The logo image URL from the header/nav, 6) Any favicon link href values, 7) Any Google Fonts link href values. Do not summarise — list every URL you find, one per line.")
+```
+
+Then run a **third WebFetch call** on each key sub-page (`/about`, `/services`, `/portfolio`) with the same asset-only prompt to catch images that don't appear on the homepage.
+
+**Call D — Googlebot UA raw curl (hero images + JS-gated media)**
+
+JS-rendered platforms (Wix, Webflow, Squarespace) load hero background images and video references only after JavaScript runs — WebFetch never sees them. Use `curl` with a Googlebot User-Agent to get the SSR-rendered HTML that these platforms provide for search crawlers, which includes more component data:
+
+```bash
+curl -sA "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" "[url]" \
+  | python3 -c "
+import sys, re
+html = sys.stdin.read()
+# All unique CDN image hashes (may include hero background not in standard HTML)
+hashes = re.findall(r'wixstatic\.com/media/([a-f0-9_~.]+)', html)
+unique = sorted(set(hashes))
+for h in unique: print(h)
+# YouTube and Vimeo embeds with their surrounding context
+yt = re.findall(r'.{0,100}youtube\.com/embed/([^\?\"]+)[^\n]{0,200}', html)
+for y in yt: print('YOUTUBE:', y[:300])
+vm = re.findall(r'.{0,100}player\.vimeo\.com/video/([0-9]+)[^\n]{0,200}', html)
+for v in vm: print('VIMEO:', v[:300])
+"
+```
+
+Compare the hashes returned here against those found in Call B to assemble the complete URL inventory. **Do NOT pick the hero by file size** — see the "Asset role & binding" section below. (A real failure: the largest file on a plumber's site was a catering photo from a portfolio gallery; picking it by size put food on a plumbing hero. The actual hero — a branded company van — was obvious in the screenshot but invisible to a size heuristic.)
+
+**Call E — YouTube and video embed extraction**
+
+Separately grep the raw HTML for any embedded video references:
+
+```bash
+curl -sA "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" "[url]" \
+  | grep -oE 'youtube\.com/embed/[^\?"]+[^\s"]*|youtu\.be/[^"&]+|player\.vimeo\.com/video/[0-9]+' \
+  | sort -u
+```
+
+For each video found:
+- Extract the video ID and platform (YouTube/Vimeo)
+- Note embed parameters: `start=`, `autoplay=`, `loop=` — these reveal intent (e.g. `autoplay=1&mute=1` = background video; `controls=1` = featured content)
+- Get context: what section it's in and what the surrounding text describes
+- Fetch the video title/description via WebFetch on the YouTube/Vimeo watch URL
+
+Record in CONTENT.md:
+```markdown
+## Embedded Videos
+### [Platform]: [video-id] — [title if retrievable]
+URL: https://www.youtube.com/watch?v=[id]
+Embed params: [autoplay, start, loop, controls values]
+Context: [which section on the page, what surrounds it]
+Intent: [background-video / featured-content / gallery]
+Usage in rebuild: [how to use — see Phase 3 video guidance]
+```
+
+**In Phase 3, always include embedded videos from the source site.** Omitting them is content loss. Use these rules:
+- `autoplay=1&mute=1&controls=0` → the source used it as a background video; recreate as a muted looping iframe or `<video>` element
+- `autoplay=1&mute=1&controls=1` → featured commercial content; embed as a standard `<iframe>` player in the relevant section
+- `controls=1, autoplay=0` → user-initiated playback; embed as a standard player
+
+Never autoplay with sound. Keep `mute=1` for any autoplay embeds.
+
+Verify each extracted image URL with `curl -sI [url]` — keep only URLs that return HTTP 200. For CDN URLs that use transformation parameters (Wix, Imgix, Cloudinary), strip the transform suffix to get the native file, then re-request at an appropriate size for the use case (hero: 1600px wide, portrait: 800px, card: 600px).
+
+**Only fall back to Unsplash** after all the above attempts return zero usable image URLs for a given slot.
+
+#### Asset Role & Binding (the most error-prone step — do not skip)
+
+A flat list of image URLs is **not enough**. Every asset has a **role** (hero / logo / section-background / portfolio-item / gallery / thumbnail) and many assets have a **binding** to a specific piece of content (this photo belongs to *this* client; these four photos are *this* project's gallery). Losing role and binding is what causes the classic failures: a food photo on a plumbing hero, and random job-site photos captioned with the wrong client's name.
+
+**1. A rendered screenshot is mandatory for this step.** You cannot infer role or binding from URLs and file sizes. Get a full-page screenshot — Firecrawl `screenshot` (use `screenshotOptions: { fullPage: true }`), or `mcp__firecrawl-mcp__firecrawl_scrape` with `formats: ["screenshot"]`. If Firecrawl is unavailable, use Playwright (`npx playwright screenshot --full-page`). **Download the screenshot and actually look at it.** Crop a tall full-page screenshot into vertical bands (e.g. with PIL) and read each band — the page model becomes obvious: which image is the banner, which heading precedes which gallery.
+
+**2. Identify the hero by ROLE, never by size.** The hero is the full-bleed image at the very top, behind/above the headline — visible in the top band of the screenshot, and usually the `og:image`. Confirm it depicts the business itself (storefront, branded vehicle, team, the actual work) and matches the category. A photo that depicts something off-category (food on a plumber's site, a stock landscape) is almost never the hero even if it's the largest file — it's usually a portfolio/gallery image. When in doubt, the `og:image` + the top of the screenshot win.
+
+**3. Bind portfolio/gallery assets to their content by structure.** Source sites group work as: a **heading** (client / project name) followed by that item's **gallery** (one or more images, sometimes a video). Walk the DOM order (Firecrawl `rawHtml` or `html` preserves it) or read the screenshot top-to-bottom: each heading "owns" the images that follow it until the next heading. Record bindings explicitly:
+
+```markdown
+## Portfolio / Client Work
+### [Client/Project name] — [location or type, verbatim from source]
+Images: [url1, url2, ...]   ← one item may own MANY images (a gallery)
+Video: [embed url, or none]
+Source structure: [e.g. "H2 heading 'ALDI Grocery Stores' followed by a 4-image Wix gallery"]
+```
+
+Model this in the build as an array of items, each with an `images[]` array (and optional `video`). Never flatten to one-image-per-client when the source shows galleries.
+
+**4. Never fabricate a binding.** An image caption that asserts "this is X's project" is a **factual claim**, governed by the same rule as testimonials and credentials — it must be sourced from the page structure. If the source does not clearly bind an image to a labeled item, do NOT invent the attribution: either place the image in an unlabeled general gallery, or leave the item text-only. Guessing "this job-site photo is probably the Navy Federal one" is fabrication.
+
+**5. Verify before building.** After assembling hero + bindings in CONTENT.md, look at the screenshot once more and confirm: (a) the hero you chose is the image actually at the top, (b) every captioned asset depicts what its caption claims, (c) multi-image clients kept all their images. This 30-second visual check prevents every failure in this section.
+
 #### Step 1 — Scrape the homepage with full asset extraction
 
 ```
@@ -233,12 +334,14 @@ Before proceeding to Phase 1.5, verify CONTENT.md meets minimum viability:
 - [ ] At least 1 service name present
 - [ ] At least 1 testimonial present
 - [ ] Contact email present
-- [ ] At least 3 images extracted OR acknowledged as unavailable
+- [ ] At least 3 images extracted OR genuinely confirmed unavailable after the dedicated asset WebFetch call
 
 If fewer than 4 of these pass, the extraction is too thin to build from. Do not proceed. Instead:
 1. Attempt a second Firecrawl pass with `{ formats: ["rawHtml"] }` on any sub-pages not yet scraped
-2. Try WebFetch as a cross-reference on the homepage
+2. If on WebFetch fallback — run the **dedicated asset-only WebFetch call** (Call B above) if not already done. A general text-extraction call does NOT count as having attempted image extraction.
 3. If still thin after both attempts, output a clear explanation of what was and wasn't found, and halt — do not build on incomplete data
+
+**Important**: "No images found" is only acceptable after running the asset-only WebFetch prompt. Do not mark images as unavailable based on a general content scrape.
 
 ### What to extract:
 
@@ -388,11 +491,31 @@ Apple touch icon: [url or "none found"]
 Notes: [e.g. "only .ico found — will need SVG recreation", "SVG favicon available"]
 
 ## Images
-og:image: [url]
-Hero: [url] — [subject description]
-About/Founder: [url] — [subject description]
-[additional images with url and description]
+Extraction method used: [Firecrawl screenshot+rawHtml / WebFetch asset-only call / Googlebot UA curl / not attempted]
+Screenshot reviewed for role/binding: [yes — required / no]
+og:image: [url or "not found"]
+Hero: [url] — [subject] — confirmed it is the top full-bleed banner and depicts the business (not a gallery image)
+About/Founder: [url] — [subject]
+[additional standalone images with url, role, and description]
 Custom photography: [yes / no / unclear]
+Note: Every image URL listed here must have been verified HTTP 200 via curl before use.
+
+## Portfolio / Client Work
+[structured bindings — one block per labeled item; "none" if the site has no portfolio section]
+### [Client/Project name] — [location/type, verbatim]
+Images: [url1, url2, ...]   ← may be many (a gallery); keep them all
+Video: [embed url, or none]
+Source structure: [how the source binds these to this item, e.g. "heading + Wix gallery"]
+Binding confidence: [explicit-from-source / unclear — do not fabricate]
+
+## Embedded Videos
+[one entry per video found, or "none found"]
+### [Platform]: [video-id] — [title]
+URL: [watch URL]
+Embed params: [key params]
+Context: [section + surrounding text]
+Intent: [background-video / featured-content / gallery]
+Usage in rebuild: [which section to place it in, how to embed]
 
 ## Conversion Goal
 Primary: [action]
@@ -418,6 +541,28 @@ Differentiation opportunity: [what client can do better]
 Classify the site using `CONTENT.md`. Consult `reference/site-types.md` for the section template and default aesthetic direction that match. Record the type in `CONTENT.md`.
 
 Do not default every site to the Service Business template. A hotel, a SaaS app, a law firm, and a restaurant all need different section structures and different design directions.
+
+### Trust-Convention Check (do this before choosing a palette)
+
+A design can be objectively well-crafted and still be **wrong for its audience**. The `/frontend-design` anti-pattern check catches *genericness* (AI slop); Nielsen heuristics catch *usability*. Neither catches **industry-appropriateness** — whether the aesthetic earns trust from the specific customer in the specific buying context. That gap is how a polished dark-mode design ships for a business whose customers need it to feel safe and credible.
+
+Before committing to an aesthetic direction, answer in `CONTENT.md`:
+
+```markdown
+## Trust Convention
+Primary customer: [who they are, e.g. "homeowner with an urgent plumbing problem"]
+Buying context: [emotional state at point of decision, e.g. "stressed, comparing 3 contractors on a phone, needs to trust fast"]
+Trust is: [the primary conversion driver? or is novelty/delight the driver?]
+Category trust conventions: [what credible providers in THIS category look like — note what the competitors from Phase 1 do]
+Aesthetic risk: [does the planned direction read as the WRONG industry? e.g. "dark + neon → tech/nightclub, not a licensed plumber"]
+Verdict: [safe / risky-but-justified / wrong — and why]
+```
+
+**The rule:** for trust-driven businesses (home services, healthcare, legal, financial, childcare, trades, local B2B), **default to the trust convention of the category** and differentiate through *craft, photography, copy, and layout* — NOT through an aesthetic that fights the category's trust signals. "Differentiate from generic blue contractor sites" is a trap: the blue is a *trust signal*, not just a cliché. Beat competitors by executing the conventional-but-credible direction better, not by looking like a different industry.
+
+A bold, unexpected aesthetic (dark, maximalist, experimental) is the right call when **novelty or taste IS the product** — fashion, creative agencies, entertainment, premium hospitality, design tools. For these, looking distinctive *is* the trust signal.
+
+If the verdict is "risky-but-justified," say so explicitly and keep the bold direction restrained enough to stay credible (lighter backgrounds, brighter text, conventional accent on key trust elements). If "wrong," pick the category-appropriate direction.
 
 ---
 
@@ -506,6 +651,7 @@ Sections: [ordered list from site-type template]
 The design direction must still:
 - Be distinct from the source site's *layout and structure* (you are improving the design, not copying it)
 - Pass the `/frontend-design` anti-pattern check
+- **Pass the Trust-Convention Check from Phase 1.5** — confirm the palette and tone match what the target customer expects from a credible provider in this category. For trust-driven businesses, do not ship a dark/experimental palette unless `CONTENT.md § Trust Convention` explicitly justifies it as "risky-but-justified." A design that reads as the wrong industry fails even if it is objectively well-crafted.
 - Use the client's actual visual identity (their colors, their fonts, their photos) as the foundation
 
 ### Step 2: Build sections
@@ -752,6 +898,8 @@ Always invoke as `/critique --auto` within this loop. The `--auto` flag is a har
    - Footer with contact details exists
    If any are missing, restore them before committing.
 
+6a. **Trust-convention check** — re-read `CONTENT.md § Trust Convention` and confirm the current palette and tone still match what the target customer expects from a credible provider in this category. The `/critique --auto` pass scores craft and usability but can rate a contextually-wrong aesthetic highly — so verify this separately here. If the design reads as the wrong industry (e.g. dark/experimental palette on a trust-driven service business without explicit justification), treat it as an unresolved P1 and fix the palette before committing.
+
 7. **Deployment verification** — after pushing, confirm the Vercel deployment succeeded by checking the deployment URL returns HTTP 200. If it fails, check the Vercel build log and fix before marking the iteration complete.
 
 8. Update `ITERATIONS.md` — score, all changes made, build gate results, visual check result, regression check result, Vercel deployment URL
@@ -763,6 +911,7 @@ Always invoke as `/critique --auto` within this loop. The `--auto` flag is a har
 ### Exit criteria (all must be true):
 - Score ≥ 36/40
 - Anti-patterns verdict: PASS
+- Trust-convention check passed (palette/tone appropriate for the category, or explicitly justified in `CONTENT.md § Trust Convention`)
 - No unresolved P0 or P1 issues
 - Mobile check passed at 375px and 768px
 - Visual verification passed (fonts, images, colors rendering correctly)
@@ -841,8 +990,10 @@ Files for the client:
 1. **Write CONTENT.md before any code.** It survives context compression; your memory does not.
 2. **Scrape competitors in Phase 1.** Design direction must be informed by the real competitive context, not generic anti-slop principles alone.
 3. **Extract conversion goal in Phase 1.** Every layout decision is downstream of the primary conversion goal.
-4. **Use Firecrawl with rawHtml + screenshot.** Extract actual client images, fonts, and colors — don't invent them if they're available.
-5. **Use client's actual images, fonts, colors, logo, and favicon.** Only fall back to Unsplash/invented assets when extraction genuinely fails. Use the real logo in the Navbar and footer; use the real favicon in `index.html`. If neither can be fetched, use a text wordmark and note it in Image Placeholders.
+4. **Use Firecrawl with rawHtml + screenshot.** Extract actual client images, fonts, and colors — don't invent them if they're available. If Firecrawl is unavailable, run **two separate WebFetch calls**: one for text content, one with an asset-only prompt targeting CDN image URLs, `<img src>` values, logo, favicon, and Google Fonts links. A single general WebFetch call does NOT satisfy this rule — WebFetch strips image URLs from its markdown output.
+5. **Use client's actual images, fonts, colors, logo, and favicon.** Only fall back to Unsplash/invented assets when extraction genuinely fails AND the asset-only WebFetch pass returned nothing. Use the real logo in the Navbar and footer; use the real favicon in `index.html`. If neither can be fetched, use a text wordmark and note it in Image Placeholders. Verify every image URL with `curl -sI` before use.
+5a. **Identify the hero by role from the screenshot, never by file size.** The hero is the top full-bleed banner (and usually the `og:image`), and it must depict the business and match the category. A large off-category image is a portfolio/gallery photo, not the hero. Looking at a rendered screenshot is mandatory for hero selection.
+5b. **Preserve asset role and binding; never fabricate an attribution.** Portfolio/client galleries bind specific images (often several) to a specific labeled item via the source's heading→gallery structure. Extract that binding from DOM order or the screenshot and model items as `images[]` arrays. An image caption asserting "this is X's project" is a factual claim — source it like a testimonial. If the binding is unclear, show the image unlabeled or leave the item text-only. Do not guess which client a photo belongs to.
 6. **Testimonials are verbatim.** Character-for-character. No paraphrasing ever.
 7. **Service names, contact details, credentials are verbatim.** Everything else can be improved.
 8. **Detect site type before scaffolding.** Use `reference/site-types.md`.
@@ -851,6 +1002,7 @@ Files for the client:
 11. **Blog uses Markdown files, not TypeScript data.** Clients must be able to add posts without touching code.
 12. **404 page is required.** Add it with a route and branded design before any critique iteration.
 13. **No AI-slop patterns.** Passes `/frontend-design` anti-pattern check.
+13a. **Pass the Trust-Convention Check (Phase 1.5).** For trust-driven businesses (home services, healthcare, legal, financial, trades, local B2B), match the category's trust convention and differentiate through craft, not through an aesthetic that reads as the wrong industry. A well-crafted design that signals the wrong industry still fails. Only ship a dark/experimental palette for these businesses if `CONTENT.md § Trust Convention` explicitly justifies it.
 14. **Formspree over mailto.** mailto is fallback only.
 15. **Link Vercel in Phase 4.** `vercel link --yes` + `vercel git connect --yes`. Never run `vercel deploy` after that.
 16. **Verify deployment after every push.** HTTP 200 on the Vercel URL before marking an iteration complete.
