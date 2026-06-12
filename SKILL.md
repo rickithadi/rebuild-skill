@@ -39,14 +39,36 @@ To install: copy each skill's directory into `~/.claude/skills/` so the path is 
 
 To install: copy `seo-visual.md` into `~/.claude/agents/`. If unavailable, Phase 5 visual verification falls back to Playwright directly — install it with `npm install -D @playwright/test && npx playwright install chromium` inside the project.
 
+### Extraction backend
+
+The skill uses **CRW** (self-hosted at `https://crw.9line.dev`) as the primary extraction backend. Firecrawl is the fallback.
+
+| Backend | How it's called | Formats available |
+|---|---|---|
+| **CRW** (primary) | `curl` to `$CRW_API_URL/v1/*` | `markdown`, `html`, `rawHtml`, `links`, `json` |
+| Firecrawl (fallback) | `mcp__firecrawl-mcp__firecrawl_scrape` | `markdown`, `rawHtml`, `screenshot`, `links` |
+| WebFetch (last-resort) | `WebFetch` tool | markdown only (strips assets) |
+| Playwright | `npx playwright screenshot` | Screenshots (used regardless of backend) |
+
+**Required env vars** (set in `~/.claude/settings.json` → `env`):
+
+```
+CRW_API_URL=https://crw.9line.dev
+CRW_API_KEY=your-crw-api-key
+REBUILD_EXTRACTION_BACKEND=crw   # "crw" | "firecrawl" | "auto"
+```
+
+- `crw` — use CRW as primary, Firecrawl as fallback
+- `firecrawl` — use Firecrawl as primary, CRW as fallback
+- `auto` (default) — use whatever is available; prefer CRW if both are reachable
+
+**Fallback chain**: The skill tries backends in order configured by `REBUILD_EXTRACTION_BACKEND`. At each step, it verifies the backend is reachable (`curl -sI "$CRW_API_URL"` for CRW; check for `mcp__firecrawl-mcp__firecrawl_scrape` in the tool list for Firecrawl). If unavailable, it silently proceeds to the next. If all backends fail, it halts with a clear explanation.
+
 ### MCP servers
 
 | MCP | Status | Where used |
 |---|---|---|
-| Firecrawl (`mcp__firecrawl-mcp__firecrawl_scrape`) | **Required** | Phase 1 — content extraction |
 | Vercel MCP (`mcp__plugin_vercel_vercel`) | Optional | Phase 4 fallback if `vercel git connect` fails |
-
-Configure MCPs via your Claude Code MCP settings. Without Firecrawl, Phase 1 falls back to WebFetch with reduced fidelity on JS-rendered sites.
 
 ### CLIs — must be installed and authenticated
 
@@ -101,7 +123,11 @@ Replace `[your-team-slug]` with your slug from the Vercel dashboard (Settings �
 1. If a persistent memory system is configured, check for any existing project notes on this client or URL. If not, skip.
 2. Invoke `/frontend-design` to load design principles and anti-pattern list
 3. Check the working directory — if a `CONTENT.md` already exists, skip Phase 1 and continue from the most recent iteration
-4. Confirm Firecrawl MCP is available (`mcp__firecrawl-mcp__firecrawl_scrape`). If not, note that Phase 1 will use WebFetch with reduced fidelity on JS-rendered sites.
+4. **Detect available extraction backends:**
+   - **CRW**: run `curl -sI "$CRW_API_URL" -H "Authorization: Bearer $CRW_API_KEY" -o /dev/null -w "%{http_code}"`. If it returns 2xx, CRW is available. Note that CRW requires `renderJs: true` for JS-rendered sites (uses LightPanda).
+   - **Firecrawl**: check if `mcp__firecrawl-mcp__firecrawl_scrape` appears in the available tool list.
+   - **Playwright**: run `npx playwright --version 2>/dev/null` — needed for screenshots (CRW doesn't capture screenshots). If missing, install: `npm install -D @playwright/test && npx playwright install chromium`.
+   - Set `USE_CRW` and `USE_FIRECRAWL` flags based on which backends are reachable. If neither is available, halt — do not proceed with WebFetch alone.
 5. Identify 2–3 direct competitors from the reference URL's industry and market. These will be scraped in Phase 1 to inform the design direction with real competitive context rather than generic anti-slop principles.
 
 ---
@@ -112,9 +138,78 @@ Replace `[your-team-slug]` with your slug from the Vercel dashboard (Settings �
 
 ### Extraction method
 
-Use **Firecrawl** as the primary tool. Fall back to WebFetch only if Firecrawl is unavailable.
+The skill uses a **CRW-first** extraction pipeline. CRW handles markdown, html, rawHtml, and links. Playwright handles screenshots (CRW doesn't capture them). Firecrawl is the fallback for everything.
 
-#### WebFetch fallback protocol (when Firecrawl is unavailable)
+#### The CRW scrape helper
+
+All CRW calls use this pattern. The API is Firecrawl-compatible — same endpoint shapes, same payloads:
+
+```bash
+# Universal CRW scrape helper — use this pattern for all calls
+curl -sX POST "$CRW_API_URL/v1/scrape" \
+  -H "Authorization: Bearer $CRW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"[url]","formats":["markdown","html","links"],"renderJs":true}'
+```
+
+**Key CRW parameters:**
+
+| Param | Type | Notes |
+|---|---|---|
+| `url` | string | **Required** |
+| `formats` | string[] | `markdown`, `html`, `rawHtml`, `links`, `json`, `summary`, `plainText` |
+| `renderJs` | boolean | Set `true` for JS sites (CRW uses LightPanda). Default: auto-detect |
+| `onlyMainContent` | boolean | Default `true`. Set `false` for rawHtml to get full page including nav/footer |
+| `waitFor` | number | ms to wait after JS render |
+| `includeTags` | string[] | CSS selectors to keep |
+| `excludeTags` | string[] | CSS selectors to remove |
+
+**Response shape:**
+```json
+{
+  "success": true,
+  "data": {
+    "markdown": "# Page Title\n\nContent...",
+    "html": "<html>...",
+    "rawHtml": "<!DOCTYPE html>...",
+    "links": ["/about", "/services", "/contact"],
+    "metadata": {
+      "title": "Page Title",
+      "sourceURL": "https://example.com",
+      "statusCode": 200,
+      "elapsedMs": 42
+    }
+  }
+}
+```
+
+Access fields with `jq`: `jq -r '.data.markdown'`, `jq -r '.data.rawHtml'`, etc.
+
+#### Screenshots
+
+CRW does not capture screenshots. Use **Playwright** for all visual references:
+
+```bash
+npx playwright screenshot --browser chromium --full-page [url] screenshot.png
+```
+
+This replaces the Firecrawl `screenshot` format. Save the screenshot as `before-[slug].png` and reference it in `CONTENT.md § Before Screenshot`.
+
+---
+
+#### Firecrawl fallback (when CRW is unreachable)
+
+If CRW is unreachable (Phase 0 check failed), use Firecrawl exactly as described below. All the same extraction logic applies — only the tool changes.
+
+```
+firecrawl_scrape(url, { formats: ["rawHtml", "markdown", "links", "screenshot"] })
+```
+
+Firecrawl's `rawHtml` replaces CRW's `rawHtml`; Firecrawl's `screenshot` replaces Playwright. The rest of the pipeline is identical.
+
+---
+
+#### WebFetch fallback protocol (when CRW AND Firecrawl are both unavailable)
 
 WebFetch converts HTML to markdown and strips structural markup — it **will not** return image URLs, font `<link>` tags, or `<meta>` color values from a single general scrape. To compensate, run **two separate WebFetch calls** on the homepage:
 
@@ -130,12 +225,16 @@ WebFetch(url, prompt: "Extract ONLY asset URLs from this page. List verbatim: 1)
 
 Then run a **third WebFetch call** on each key sub-page (`/about`, `/services`, `/portfolio`) with the same asset-only prompt to catch images that don't appear on the homepage.
 
-**Call D — Googlebot UA raw curl (hero images + JS-gated media)**
+**Call D — CRW rawHtml deep extraction (hero images + JS-gated media)**
 
-JS-rendered platforms (Wix, Webflow, Squarespace) load hero background images and video references only after JavaScript runs — WebFetch never sees them. Use `curl` with a Googlebot User-Agent to get the SSR-rendered HTML that these platforms provide for search crawlers, which includes more component data:
+JS-rendered platforms (Wix, Webflow, Squarespace) load hero background images and video references only after JavaScript runs — WebFetch never sees them, and even CRW's markdown output strips them. Use CRW's `rawHtml` format with `renderJs: true` to get the full SSR+JS-rendered HTML:
 
 ```bash
-curl -sA "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" "[url]" \
+curl -sX POST "$CRW_API_URL/v1/scrape" \
+  -H "Authorization: Bearer $CRW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"[url]","formats":["rawHtml"],"onlyMainContent":false,"renderJs":true}' \
+  | jq -r '.data.rawHtml' \
   | python3 -c "
 import sys, re
 html = sys.stdin.read()
@@ -151,13 +250,29 @@ for v in vm: print('VIMEO:', v[:300])
 "
 ```
 
+If CRW is unavailable, fall back to the Googlebot UA curl:
+```bash
+curl -sA "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" "[url]" \
+  | python3 -c "..."  # same python script as above
+```
+
 Compare the hashes returned here against those found in Call B to assemble the complete URL inventory. **Do NOT pick the hero by file size** — see the "Asset role & binding" section below. (A real failure: the largest file on a plumber's site was a catering photo from a portfolio gallery; picking it by size put food on a plumbing hero. The actual hero — a branded company van — was obvious in the screenshot but invisible to a size heuristic.)
 
 **Call E — YouTube and video embed extraction**
 
-Separately grep the raw HTML for any embedded video references:
+Extract video embeds from CRW rawHtml (or Googlebot fallback):
 
 ```bash
+# Primary: extract from CRW rawHtml
+curl -sX POST "$CRW_API_URL/v1/scrape" \
+  -H "Authorization: Bearer $CRW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"[url]","formats":["rawHtml"],"onlyMainContent":false,"renderJs":true}' \
+  | jq -r '.data.rawHtml' \
+  | grep -oE 'youtube\.com/embed/[^\?"]+[^\s"]*|youtu\.be/[^"&]+|player\.vimeo\.com/video/[0-9]+' \
+  | sort -u
+
+# Fallback: Googlebot UA curl
 curl -sA "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)" "[url]" \
   | grep -oE 'youtube\.com/embed/[^\?"]+[^\s"]*|youtu\.be/[^"&]+|player\.vimeo\.com/video/[0-9]+' \
   | sort -u
@@ -195,11 +310,11 @@ Verify each extracted image URL with `curl -sI [url]` — keep only URLs that re
 
 A flat list of image URLs is **not enough**. Every asset has a **role** (hero / logo / section-background / portfolio-item / gallery / thumbnail) and many assets have a **binding** to a specific piece of content (this photo belongs to *this* client; these four photos are *this* project's gallery). Losing role and binding is what causes the classic failures: a food photo on a plumbing hero, and random job-site photos captioned with the wrong client's name.
 
-**1. A rendered screenshot is mandatory for this step.** You cannot infer role or binding from URLs and file sizes. Get a full-page screenshot — Firecrawl `screenshot` (use `screenshotOptions: { fullPage: true }`), or `mcp__firecrawl-mcp__firecrawl_scrape` with `formats: ["screenshot"]`. If Firecrawl is unavailable, use Playwright (`npx playwright screenshot --full-page`). **Download the screenshot and actually look at it.** Crop a tall full-page screenshot into vertical bands (e.g. with PIL) and read each band — the page model becomes obvious: which image is the banner, which heading precedes which gallery.
+**1. A rendered screenshot is mandatory for this step.** You cannot infer role or binding from URLs and file sizes. Get a full-page screenshot — Playwright (`npx playwright screenshot --browser chromium --full-page [url] screenshot.png`), or Firecrawl `screenshot` (if using Firecrawl fallback). **Review the screenshot.** Crop a tall full-page screenshot into vertical bands and examine each — the page structure becomes obvious: which image is the banner, which heading precedes which gallery.
 
 **2. Identify the hero by ROLE, never by size.** The hero is the full-bleed image at the very top, behind/above the headline — visible in the top band of the screenshot, and usually the `og:image`. Confirm it depicts the business itself (storefront, branded vehicle, team, the actual work) and matches the category. A photo that depicts something off-category (food on a plumber's site, a stock landscape) is almost never the hero even if it's the largest file — it's usually a portfolio/gallery image. When in doubt, the `og:image` + the top of the screenshot win.
 
-**3. Bind portfolio/gallery assets to their content by structure.** Source sites group work as: a **heading** (client / project name) followed by that item's **gallery** (one or more images, sometimes a video). Walk the DOM order (Firecrawl `rawHtml` or `html` preserves it) or read the screenshot top-to-bottom: each heading "owns" the images that follow it until the next heading. Record bindings explicitly:
+**3. Bind portfolio/gallery assets to their content by structure.** Source sites group work as: a **heading** (client / project name) followed by that item's **gallery** (one or more images, sometimes a video). Walk the DOM order (CRW `rawHtml` or `html` preserves it) or read the screenshot top-to-bottom: each heading "owns" the images that follow it until the next heading. Record bindings explicitly:
 
 ```markdown
 ## Portfolio / Client Work
@@ -215,19 +330,46 @@ Model this in the build as an array of items, each with an `images[]` array (and
 
 **5. Verify before building.** After assembling hero + bindings in CONTENT.md, look at the screenshot once more and confirm: (a) the hero you chose is the image actually at the top, (b) every captioned asset depicts what its caption claims, (c) multi-image clients kept all their images. This 30-second visual check prevents every failure in this section.
 
-#### Step 1 — Scrape the homepage with full asset extraction
+#### Step 1 — Scrape the homepage (3 parallel calls)
 
+Run all three simultaneously:
+
+**Call 1a — CRW scrape for markdown + html + links (text, structure, URL discovery):**
+```bash
+curl -sX POST "$CRW_API_URL/v1/scrape" \
+  -H "Authorization: Bearer $CRW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"[url]","formats":["markdown","html","links"],"renderJs":true}' \
+  -o /tmp/crw-markdown.json
+```
+
+**Call 1b — CRW scrape for rawHtml (image/font/color extraction):**
+```bash
+curl -sX POST "$CRW_API_URL/v1/scrape" \
+  -H "Authorization: Bearer $CRW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"[url]","formats":["rawHtml"],"onlyMainContent":false,"renderJs":true}' \
+  -o /tmp/crw-rawhtml.json
+```
+
+**Call 1c — Playwright screenshot (visual reference, hero identification, color analysis):**
+```bash
+npx playwright screenshot --browser chromium --full-page [url] before-[slug].png
+```
+
+The `rawHtml` output is where images, fonts, and colors are found. The screenshot is used for hero identification, role/binding, and color analysis. The `markdown` carries the text content. The `links` reveal the site structure.
+
+Check word count of the markdown result: if under ~300 words, the site likely uses heavy JS rendering — ensure `renderJs: true` was set and retry with `waitFor: 3000`.
+
+**If using Firecrawl fallback**, replace the three calls with:
 ```
 firecrawl_scrape(url, { formats: ["rawHtml", "markdown", "links", "screenshot"] })
 ```
-
-The `rawHtml` output is where images, fonts, and colors are found. The `screenshot` is used for color analysis. The `markdown` carries the text content. The `links` reveal the site structure.
-
-Check word count of the markdown result: if under ~300 words, the site likely uses heavy JS rendering and Firecrawl may have been partially blocked — note this in CONTENT.md and attempt WebFetch as a cross-reference.
+Firecrawl's `screenshot` replaces Playwright in this case.
 
 #### Step 2 — Extract visual assets from rawHtml
 
-From the `rawHtml`, extract:
+From the CRW `rawHtml` output (`jq -r '.data.rawHtml' /tmp/crw-rawhtml.json`), extract:
 
 **Logo**
 - Look for `<img>` tags in `<header>` or `<nav>` with `alt` text containing the site/brand name, or class/id names like `logo`, `brand`, `site-logo`
@@ -270,7 +412,41 @@ Build the CSS token palette from these extracted values. Improve the combination
 
 #### Step 3 — Scrape key sub-pages for content
 
-From the `links` in Step 1, identify and scrape:
+**Primary method: CRW crawl** — a single async job that scrapes all sub-pages:
+
+```bash
+# Start the crawl (bounded to 10 pages, depth 2)
+CRAWL_ID=$(curl -sX POST "$CRW_API_URL/v1/crawl" \
+  -H "Authorization: Bearer $CRW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"[url]","maxPages":10,"maxDepth":2}' \
+  | jq -r '.id')
+
+# Poll until complete (check every 5 seconds, max 60s timeout)
+for i in $(seq 1 12); do
+  STATUS=$(curl -s "$CRW_API_URL/v1/crawl/$CRAWL_ID" \
+    -H "Authorization: Bearer $CRW_API_KEY" \
+    | jq -r '.status')
+  if [ "$STATUS" = "completed" ]; then break; fi
+  sleep 5
+done
+
+# Fetch final results
+curl -s "$CRW_API_URL/v1/crawl/$CRAWL_ID" \
+  -H "Authorization: Bearer $CRW_API_KEY" \
+  -o /tmp/crw-crawl-results.json
+```
+
+The crawl result contains markdown for every page discovered. For pages with important visual content (about, services, portfolio), run individual CRW scrapes with `formats: ["rawHtml"]` to extract images and fonts:
+
+```bash
+curl -sX POST "$CRW_API_URL/v1/scrape" \
+  -H "Authorization: Bearer $CRW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"[url]/about","formats":["rawHtml","markdown"],"renderJs":true}'
+```
+
+**Fallback (no CRW crawl):** From the `links` in Step 1, identify and manually scrape:
 - `/about` or `/our-story`
 - `/services` or `/work` or `/offerings`
 - `/faq`
@@ -287,6 +463,19 @@ Extract additional images and any new font/color references from sub-page `rawHt
 
 Using the competitors identified in Phase 0, scrape each homepage:
 
+**CRW:**
+```bash
+# Markdown for content
+curl -sX POST "$CRW_API_URL/v1/scrape" \
+  -H "Authorization: Bearer $CRW_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"url\":\"[competitor_url]\",\"formats\":[\"markdown\"],\"renderJs\":true}"
+
+# Playwright screenshot for visual reference
+npx playwright screenshot --browser chromium --full-page [competitor_url] competitor-[name].png
+```
+
+**Firecrawl fallback:**
 ```
 firecrawl_scrape(competitor_url, { formats: ["markdown", "screenshot"] })
 ```
@@ -324,7 +513,7 @@ This informs every layout decision in Phase 3 — CTA placement, social proof pr
 
 #### Step 6 — Write CONTENT.md immediately
 
-Compile everything into `CONTENT.md` before touching any code. Save the Firecrawl `screenshot` from Step 1 as the **before** artifact — note its URL or embed it in CONTENT.md under `## Before Screenshot`. This will be used in the PITCH.md before/after comparison.
+Compile everything into `CONTENT.md` before touching any code. Save the Playwright `screenshot` from Step 1c as the **before** artifact — note its path in CONTENT.md under `## Before Screenshot`. This will be used in the PITCH.md before/after comparison.
 
 #### Step 7 — Quality gate
 
@@ -337,11 +526,12 @@ Before proceeding to Phase 1.5, verify CONTENT.md meets minimum viability:
 - [ ] At least 3 images extracted OR genuinely confirmed unavailable after the dedicated asset WebFetch call
 
 If fewer than 4 of these pass, the extraction is too thin to build from. Do not proceed. Instead:
-1. Attempt a second Firecrawl pass with `{ formats: ["rawHtml"] }` on any sub-pages not yet scraped
-2. If on WebFetch fallback — run the **dedicated asset-only WebFetch call** (Call B above) if not already done. A general text-extraction call does NOT count as having attempted image extraction.
-3. If still thin after both attempts, output a clear explanation of what was and wasn't found, and halt — do not build on incomplete data
+1. Retry CRW with `renderJs: true` and `waitFor: 3000` (JS-heavy sites may need more render time)
+2. Attempt a Firecrawl fallback pass with `{ formats: ["rawHtml"] }` on any sub-pages not yet scraped
+3. If on WebFetch fallback — run the **dedicated asset-only WebFetch call** (Call B above) if not already done. A general text-extraction call does NOT count as having attempted image extraction.
+4. If still thin after all attempts, output a clear explanation of what was and wasn't found, and halt — do not build on incomplete data
 
-**Important**: "No images found" is only acceptable after running the asset-only WebFetch prompt. Do not mark images as unavailable based on a general content scrape.
+**Important**: "No images found" is only acceptable after running the CRW rawHtml extraction AND the asset-only WebFetch prompt. Do not mark images as unavailable based on a general content scrape.
 
 ### What to extract:
 
@@ -491,7 +681,7 @@ Apple touch icon: [url or "none found"]
 Notes: [e.g. "only .ico found — will need SVG recreation", "SVG favicon available"]
 
 ## Images
-Extraction method used: [Firecrawl screenshot+rawHtml / WebFetch asset-only call / Googlebot UA curl / not attempted]
+Extraction method used: [CRW rawHtml+screenshot / Firecrawl / WebFetch / Googlebot UA curl / not attempted]
 Screenshot reviewed for role/binding: [yes — required / no]
 og:image: [url or "not found"]
 Hero: [url] — [subject] — confirmed it is the top full-bleed banner and depicts the business (not a gallery image)
@@ -528,7 +718,7 @@ Value prop: [headline]
 Differentiation opportunity: [what client can do better]
 
 ## Before Screenshot
-[Firecrawl screenshot URL from Phase 1 Step 1]
+[Screenshot path from Phase 1 Step 1c — e.g. before-[slug].png]
 
 ## Image Placeholders
 [filled in during Phase 3 — only for images where the source URL failed or was unavailable]
@@ -883,7 +1073,7 @@ Always invoke as `/critique --auto` within this loop. The `--auto` flag is a har
    - No horizontal scroll at any viewport width
    Fix any issues found.
 
-5. **Visual verification** — take a screenshot of the built/deployed site at 1440px and 375px. Use whichever tool is available: the `seo-visual` agent if installed, otherwise Playwright directly (`npx playwright screenshot --browser chromium --viewport-size "1440,900" [url] screenshot-1440.png`). If neither is available, note it in `ITERATIONS.md` and skip this check rather than stalling. Compare against the Firecrawl screenshot saved in `CONTENT.md § Before Screenshot`. Check:
+5. **Visual verification** — take a screenshot of the built/deployed site at 1440px and 375px. Use whichever tool is available: the `seo-visual` agent if installed, otherwise Playwright directly (`npx playwright screenshot --browser chromium --viewport-size "1440,900" [url] screenshot-1440.png`). If neither is available, note it in `ITERATIONS.md` and skip this check rather than stalling. Compare against the before screenshot saved in `CONTENT.md § Before Screenshot`. Check:
    - Fonts are rendering (not falling back to system fonts)
    - Hero image is loading
    - Color palette matches extracted brand colors
@@ -940,7 +1130,7 @@ Mark the last iteration `✓ FINAL` and note which branch was merged to `main`. 
 
 Generate from `reference/pitch-template.md`. Enhancements for this version:
 
-**Before/after section**: Include the Firecrawl screenshot URL from `CONTENT.md § Before Screenshot` as the "before" image. Add a note that the "after" is live at the Vercel URL. Frame the comparison around the 3 most visible improvements found in the first critique pass.
+**Before/after section**: Include the before screenshot from `CONTENT.md § Before Screenshot` as the "before" image. Add a note that the "after" is live at the Vercel URL. Frame the comparison around the 3 most visible improvements found in the first critique pass.
 
 **Competitor context**: Add a brief line using `CONTENT.md § Competitor Analysis` — something like: *"We reviewed [Competitor A] and [Competitor B] while designing this. The approach we took differentiates on [specific opportunity]."* This positions the rebuild as research-informed, not just aesthetically improved.
 
@@ -990,7 +1180,7 @@ Files for the client:
 1. **Write CONTENT.md before any code.** It survives context compression; your memory does not.
 2. **Scrape competitors in Phase 1.** Design direction must be informed by the real competitive context, not generic anti-slop principles alone.
 3. **Extract conversion goal in Phase 1.** Every layout decision is downstream of the primary conversion goal.
-4. **Use Firecrawl with rawHtml + screenshot.** Extract actual client images, fonts, and colors — don't invent them if they're available. If Firecrawl is unavailable, run **two separate WebFetch calls**: one for text content, one with an asset-only prompt targeting CDN image URLs, `<img src>` values, logo, favicon, and Google Fonts links. A single general WebFetch call does NOT satisfy this rule — WebFetch strips image URLs from its markdown output.
+4. **Use CRW with rawHtml + Playwright screenshot.** Extract actual client images, fonts, and colors from the source site — don't invent them if they're available. CRW is the primary extraction backend (self-hosted at `crw.9line.dev`, $0 per scrape). If CRW is unavailable, fall back to Firecrawl. If both are unavailable, run **two separate WebFetch calls**: one for text content, one with an asset-only prompt targeting CDN image URLs, `<img src>` values, logo, favicon, and Google Fonts links. A single general WebFetch call does NOT satisfy this rule — WebFetch strips image URLs from its markdown output.
 5. **Use client's actual images, fonts, colors, logo, and favicon.** Only fall back to Unsplash/invented assets when extraction genuinely fails AND the asset-only WebFetch pass returned nothing. Use the real logo in the Navbar and footer; use the real favicon in `index.html`. If neither can be fetched, use a text wordmark and note it in Image Placeholders. Verify every image URL with `curl -sI` before use.
 5a. **Identify the hero by role from the screenshot, never by file size.** The hero is the top full-bleed banner (and usually the `og:image`), and it must depict the business and match the category. A large off-category image is a portfolio/gallery photo, not the hero. Looking at a rendered screenshot is mandatory for hero selection.
 5b. **Preserve asset role and binding; never fabricate an attribution.** Portfolio/client galleries bind specific images (often several) to a specific labeled item via the source's heading→gallery structure. Extract that binding from DOM order or the screenshot and model items as `images[]` arrays. An image caption asserting "this is X's project" is a factual claim — source it like a testimonial. If the binding is unclear, show the image unlabeled or leave the item text-only. Do not guess which client a photo belongs to.
